@@ -13,7 +13,14 @@ from utils import *
 
 from model import Generator, Discriminator
 
+from torch.utils.tensorboard.writer import SummaryWriter
+import time
+import psutil
+
+
 def main():
+    total_time = time.time() # 시작 시간 저장
+    writer = SummaryWriter()
     parser = argparse.ArgumentParser()
 
     # Model configuration.
@@ -39,8 +46,8 @@ def main():
     parser.add_argument('--num_workers', type=int, default=0)
     parser.add_argument('--mode', type=str, default='test', choices=['train', 'test'])
 
-    parser.add_argument('--celeba_image_dir', type=str, default='C:/Users/Bandi/Desktop/AntiForgery/data/celeba/images')
-    parser.add_argument('--attr_path', type=str, default='C:/Users/Bandi/Desktop/AntiForgery/data/celeba/list_attr_celeba.txt')
+    parser.add_argument('--celeba_image_dir', type=str, default='C:/Users/Bandi/Desktop/Fork/AntiForgery/data/celeba/images')
+    parser.add_argument('--attr_path', type=str, default='C:/Users/Bandi/Desktop/Fork/AntiForgery/data/celeba/list_attr_celeba.txt')
     parser.add_argument('--model_save_dir', type=str, default='stargan_celeba_256/models')
     parser.add_argument('--result_dir', type=str, default='results')
 
@@ -48,27 +55,47 @@ def main():
 
     os.makedirs(config.result_dir, exist_ok=True)
 
+    # data loader
+    start_time = time.time()
+
     celeba_loader = get_loader(config.celeba_image_dir, config.attr_path, config.selected_attrs,
                                config.celeba_crop_size, config.image_size, config.batch_size,
                                'CelebA', config.mode, config.num_workers)
+    
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"************ celeba_lader 실행 시간: {execution_time} 초")
 
-    # starganconfig.
+    # 모델 설정 및 로드
+    start_time = time.time()
+
     G = Generator(config.g_conv_dim, config.c_dim, config.g_repeat_num)
     D = Discriminator(config.image_size, config.d_conv_dim, config.c_dim, config.d_repeat_num)
     G.cuda()
     D.cuda()
+    
     # load weights
     print('Loading the trained models from step {}...'.format(config.resume_iters))
     G_path = os.path.join(config.model_save_dir, '{}-G.ckpt'.format(config.resume_iters))
     D_path = os.path.join(config.model_save_dir, '{}-D.ckpt'.format(config.resume_iters))
     # self.G.load_state_dict(torch.load(G_path, map_location=lambda storage, loc: storage))
     load_model_weights(G, G_path)
-    D.load_state_dict(torch.load(D_path, map_location=lambda storage, loc: storage))
+    D.load_state_dict(torch.load(D_path, map_location='cuda'))
     print("loading model successful")
+
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"*********** 모델 및 가중치 load 실행 시간: {execution_time} 초")
 
     l2_error, ssim, psnr = 0.0, 0.0, 0.0
     n_samples, n_dist = 0, 0
+
+    # 이미지 반복하여 처리 
+    start_time = time.time()
+
     for i, (x_real, c_org) in enumerate(celeba_loader):
+        image_start = time.time()
+
         # Prepare input images and target domain labels.
         x_real = x_real.cuda()
         c_trg_list = create_labels(c_org, config.c_dim, 'CelebA', config.selected_attrs)
@@ -108,8 +135,18 @@ def main():
         x_concat = torch.cat(x_fake_list, dim=3)
         result_path = os.path.join(config.result_dir, '{}-images.jpg'.format(i + 1))
         save_image(denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
+
+        image_end = time.time()
+        execution_image = image_end - image_start
+        print(f"*********** {i+1}번째 이미지 처리 시간: {execution_image} 초")   
+        writer.add_scalar("Time/image_idx", execution_image, i)
+
         if i == 50:  # stop after this many images
             break
+
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"*********** 이미지 처리 전체 실행 시간: {execution_time} 초")        
 
     # Print metrics
     print('{} images.L2 error: {}. ssim: {}. psnr: {}. n_dist: {}'.format(n_samples,
@@ -117,6 +154,12 @@ def main():
                                                                      ssim / n_samples,
                                                                      psnr / n_samples,
                                                                     float(n_dist) / n_samples))
+    
+    total_end_time = time.time()
+    total = total_end_time-total_time
+    print(f"*********** main 실행시간: {total} 초")    
+    writer.close()
+
 # 사용 예시
 if __name__ == "__main__":
     main()
