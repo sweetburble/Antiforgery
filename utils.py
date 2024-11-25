@@ -51,6 +51,15 @@ def create_labels(c_org, c_dim=5, dataset='CelebA', selected_attrs=None):
         c_trg_list.append(c_trg.cuda())
     return c_trg_list
 
+from joblib import Parallel, delayed
+
+def compare_images(gen_list):
+    """이미지 리스트 간의 SSIM 및 PSNR 계산"""
+    results = Parallel(n_jobs=-1)(delayed(compare)(denorm(gen), denorm(gen_noattack)) for gen in gen_list)
+    ssim_list, psnr_list = zip(*results)
+    return sum(ssim_list) / len(ssim_list), sum(psnr_list) / len(psnr_list)
+
+
 def compare(img1, img2):
     """이미지 비교 (SSIM 및 PSNR 계산)"""
     img1_np = img1.squeeze(0).cpu().numpy()
@@ -120,3 +129,10 @@ def lab_attack(X_nat, c_trg, model, epsilon=0.05, iter=100):
 
         # print(f"[lab_attack] Iter {i}: Loss={loss.item()}, Perturbation Range: {pert.min().item()} to {pert.max().item()}")
     return X_new, X_new - X
+
+'''
+
+여기서부터 병렬/분산 처리를 위한 코드 추가
+
+'''
+

@@ -12,16 +12,17 @@ from color_space import *
 from data_loader import get_loader
 from utils import *
 
-from model import Generator, Discriminator
+from model import Generator, Discriminator, forward_with_streams
+from data_loader import create_expanded_batch
 
 from torch.utils.tensorboard.writer import SummaryWriter
 import time
-import psutil
-
+from multiprocessing import Pool
+from logger import setup_logger
 
 def main():
+    logger = setup_logger() # 로깅을 위한 logger 설정
     total_time = time.time() # 시작 시간 저장
-    writer = SummaryWriter()
     parser = argparse.ArgumentParser()
 
     # Model configuration.
@@ -65,7 +66,8 @@ def main():
     
     end_time = time.time()
     execution_time = end_time - start_time
-    print(f"************ celeba_lader 실행 시간: {execution_time} 초")
+    logger.info(f"************ celeba_loader 실행 시간: {execution_time} 초")
+    print(f"************ celeba_loader 실행 시간: {execution_time} 초")
 
     # 모델 설정 및 로드
     start_time = time.time()
@@ -77,16 +79,20 @@ def main():
     
     # load weights
     print('Loading the trained models from step {}...'.format(config.resume_iters))
+    logger.info('Loading the trained models from step {}...'.format(config.resume_iters))
+
     G_path = os.path.join(config.model_save_dir, '{}-G.ckpt'.format(config.resume_iters))
     D_path = os.path.join(config.model_save_dir, '{}-D.ckpt'.format(config.resume_iters))
-    # self.G.load_state_dict(torch.load(G_path, map_location=lambda storage, loc: storage))
+    
     load_model_weights(G, G_path)
     D.load_state_dict(torch.load(D_path, map_location='cuda'))
     print("loading model successful")
+    logger.info("loading model successful")
 
     end_time = time.time()
     execution_time = end_time - start_time
     print(f"*********** 모델 및 가중치 load 실행 시간: {execution_time} 초")
+    logger.info(f"*********** 모델 및 가중치 load 실행 시간: {execution_time} 초")
 
     l2_error, ssim, psnr = 0.0, 0.0, 0.0
     n_samples, n_dist = 0, 0
@@ -102,47 +108,49 @@ def main():
 
         # Prepare input images and target domain labels.
         x_real = x_real.cuda()
-        c_trg_list = create_labels(c_org, config.c_dim, 'CelebA', config.selected_attrs)
+        # 확장된 배치 생성
+        x_expanded, c_expanded = create_expanded_batch(x_real, c_org, config.selected_attrs)
 
-        x_fake_list = [x_real]
+        # LAB 공격 수행
+        x_adv, pert = lab_attack(x_expanded, [c_expanded], G, iter=config.attack_iters)
 
-        # generate adv in lab space
-        x_adv, pert = lab_attack(x_real, c_trg_list, G, iter=config.attack_iters)
+        # 비동기적으로 모델 추론 수행, LAB 공격 후에도 병렬 처리 적용 (원본 및 LAB 공격 이미지 모두 처리)
+        with torch.no_grad():
+            gen_outputs_noattack = forward_with_streams(G, x_expanded, c_expanded)  
+            gen_outputs_adv = forward_with_streams(G, x_adv, c_expanded) 
 
-        x_fake_list.append(x_adv)
+        # 결과 복원 및 평가
+        gen_outputs_noattack_split = torch.split(gen_outputs_noattack, x_real.size(0))
+        gen_outputs_adv_split = torch.split(gen_outputs_adv, x_real.size(0))
 
-        for idx, c_trg in enumerate(c_trg_list):
+        # 결과 저장 및 평가
+        for idx in range(len(config.selected_attrs)):
             print('image', i+1, 'class', idx)
-            with torch.no_grad():
-                x_real_mod = x_real
-                gen_noattack, gen_noattack_feats = G(x_real_mod, c_trg)
+            
+            gen_noattack = gen_outputs_noattack_split[idx]
+            gen_adv = gen_outputs_adv_split[idx]
 
-            # Metrics
-            with torch.no_grad():
-                gen, _ = G(x_adv, c_trg)
-                # Add to lists
-                x_fake_list.append(gen_noattack)
-                # x_fake_list.append(perturb)
-                x_fake_list.append(gen)
+            # Metrics 계산 (L2 error, SSIM, PSNR)
+            l2_error += F.mse_loss(gen_adv, gen_noattack)
+            
+            ssim_local, psnr_local = compare(denorm(gen_adv), denorm(gen_noattack))
+            ssim += ssim_local
+            psnr += psnr_local
 
-                l2_error += F.mse_loss(gen, gen_noattack)
-
-                ssim_local, psnr_local = compare(denorm(gen), denorm(gen_noattack))
-                ssim += ssim_local
-                psnr += psnr_local
-
-                if F.mse_loss(gen, gen_noattack) > 0.05:
-                    n_dist += 1
-                n_samples += 1
+            if F.mse_loss(gen_adv, gen_noattack) > 0.05:
+                n_dist += 1
+            
+            n_samples += 1
 
         # Save the translated images.
-        x_concat = torch.cat(x_fake_list, dim=3)
+        # x_concat = torch.cat(x_fake_list, dim=3)
         result_path = os.path.join(config.result_dir, '{}-images.jpg'.format(i + 1))
-        save_image(denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
+        save_image(denorm(gen_adv.data.cpu()), result_path, nrow=1, padding=0)
 
         image_end = time.time()
         execution_image = image_end - image_start
         print(f"*********** {i+1}번째 이미지 처리 시간: {execution_image} 초")   
+        logger.info(f"*********** {i+1}번째 이미지 처리 시간: {execution_image} 초")
         
         execution_time_one_image += execution_image
 
@@ -152,8 +160,9 @@ def main():
     end_time = time.time()
     execution_time = end_time - start_time
     print(f"*********** 이미지 처리 전체 실행 시간: {execution_time} 초")
-
-    print(f"*********** 평균적인 이미지 한 장 처리 시간: {execution_time_one_image / 50} 초")        
+    print(f"*********** 평균적인 이미지 한 장 처리 시간: {execution_time_one_image / 50} 초")
+    logger.info(f"*********** 이미지 처리 전체 실행 시간: {execution_time} 초")
+    logger.info(f"*********** 평균적인 이미지 한 장 처리 시간: {execution_time_one_image / 50} 초")        
 
     # Print metrics
     print('{} images.L2 error: {}. ssim: {}. psnr: {}. n_dist: {}'.format(n_samples,
@@ -164,8 +173,14 @@ def main():
     
     total_end_time = time.time()
     total = total_end_time-total_time
-    print(f"*********** main 실행시간: {total} 초")    
-    writer.close()
+    print(f"*********** main 실행시간: {total} 초")
+    logger.info(f"*********** main 실행시간: {total} 초")    
+
+'''
+여기서부터 병렬/분산 처리를 위한 코드 추가
+
+'''
+
 
 # 사용 예시
 if __name__ == "__main__":
