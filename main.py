@@ -1,3 +1,4 @@
+from math import e
 import torch
 import numpy as np
 import argparse
@@ -93,6 +94,9 @@ def main():
     # 이미지 반복하여 처리 
     start_time = time.time()
 
+    # 평균적인 이미지 한 장 처리 시간 측정을 위해
+    execution_time_one_image = 0.0
+
     for i, (x_real, c_org) in enumerate(celeba_loader):
         image_start = time.time()
 
@@ -108,7 +112,7 @@ def main():
         x_fake_list.append(x_adv)
 
         for idx, c_trg in enumerate(c_trg_list):
-            print('image', i, 'class', idx)
+            print('image', i+1, 'class', idx)
             with torch.no_grad():
                 x_real_mod = x_real
                 gen_noattack, gen_noattack_feats = G(x_real_mod, c_trg)
@@ -139,14 +143,17 @@ def main():
         image_end = time.time()
         execution_image = image_end - image_start
         print(f"*********** {i+1}번째 이미지 처리 시간: {execution_image} 초")   
-        writer.add_scalar("Time/image_idx", execution_image, i)
+        
+        execution_time_one_image += execution_image
 
         if i == 50:  # stop after this many images
             break
 
     end_time = time.time()
     execution_time = end_time - start_time
-    print(f"*********** 이미지 처리 전체 실행 시간: {execution_time} 초")        
+    print(f"*********** 이미지 처리 전체 실행 시간: {execution_time} 초")
+
+    print(f"*********** 평균적인 이미지 한 장 처리 시간: {execution_time_one_image / 50} 초")        
 
     # Print metrics
     print('{} images.L2 error: {}. ssim: {}. psnr: {}. n_dist: {}'.format(n_samples,

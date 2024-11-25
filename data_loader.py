@@ -76,9 +76,9 @@ class CelebA(data.Dataset):
         return self.num_images
 
 
-
+# batch_size : 1 -> 16, num_workers : 0 -> os.cpu_count()
 def get_loader(image_dir, attr_path, selected_attrs, crop_size=178, image_size=256,
-               batch_size=1, dataset='CelebA', mode='test', num_workers=0):
+               batch_size=16, dataset='CelebA', mode='test', num_workers=os.cpu_count()):
     """Build and return a data loader."""
     transform = []
     if mode == 'train':
@@ -97,5 +97,6 @@ def get_loader(image_dir, attr_path, selected_attrs, crop_size=178, image_size=2
     data_loader = data.DataLoader(dataset=dataset,
                                   batch_size=batch_size,
                                   shuffle=(mode=='train'),
-                                  num_workers=num_workers)
+                                  num_workers=num_workers, 
+                                  pin_memory=True) # GPU 전송 최적화
     return data_loader
