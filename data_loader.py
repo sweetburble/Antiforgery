@@ -104,10 +104,3 @@ def get_loader(image_dir, attr_path, selected_attrs, crop_size=178, image_size=2
 '''
 여기서부터 병렬/분산 처리를 위한 코드 추가
 '''
-
-def create_expanded_batch(x_real, c_org, selected_attrs):
-    """입력 이미지와 모든 도메인 레이블을 결합하여 확장된 배치를 생성"""
-    c_trg_list = create_labels(c_org, len(selected_attrs), 'CelebA', selected_attrs)
-    x_expanded = torch.cat([x_real for _ in range(len(c_trg_list))], dim=0)
-    c_expanded = torch.cat(c_trg_list, dim=0)
-    return x_expanded, c_expanded
