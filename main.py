@@ -12,10 +12,8 @@ from color_space import *
 from data_loader import get_loader
 from utils import *
 
-from model import Generator, Discriminator, forward_with_streams
-from data_loader import create_expanded_batch
+from model import Generator, Discriminator
 
-from torch.utils.tensorboard.writer import SummaryWriter
 import time
 from multiprocessing import Pool
 from logger import setup_logger
@@ -108,44 +106,46 @@ def main():
 
         # Prepare input images and target domain labels.
         x_real = x_real.cuda()
-        # 확장된 배치 생성
-        x_expanded, c_expanded = create_expanded_batch(x_real, c_org, config.selected_attrs)
+        c_trg_list = create_labels(c_org, config.c_dim, 'CelebA', config.selected_attrs)
 
-        # LAB 공격 수행
-        x_adv, pert = lab_attack(x_expanded, [c_expanded], G, iter=config.attack_iters)
+        x_fake_list = [x_real]
 
-        # 비동기적으로 모델 추론 수행, LAB 공격 후에도 병렬 처리 적용 (원본 및 LAB 공격 이미지 모두 처리)
-        with torch.no_grad():
-            gen_outputs_noattack = forward_with_streams(G, x_expanded, c_expanded)  
-            gen_outputs_adv = forward_with_streams(G, x_adv, c_expanded) 
+        # generate adv in lab space
+        x_adv, pert = lab_attack(x_real, c_trg_list, G, iter=config.attack_iters)
 
-        # 결과 복원 및 평가
-        gen_outputs_noattack_split = torch.split(gen_outputs_noattack, x_real.size(0))
-        gen_outputs_adv_split = torch.split(gen_outputs_adv, x_real.size(0))
+        x_fake_list.append(x_adv)
 
         # 결과 저장 및 평가
-        for idx in range(len(config.selected_attrs)):
+        for idx, c_trg in enumerate(c_trg_list):
             print('image', i+1, 'class', idx)
             
-            gen_noattack = gen_outputs_noattack_split[idx]
-            gen_adv = gen_outputs_adv_split[idx]
+            with torch.no_grad():
+                x_real_mod = x_real
+                gen_noattack, gen_noattack_feats = G(x_real_mod, c_trg)
 
-            # Metrics 계산 (L2 error, SSIM, PSNR)
-            l2_error += F.mse_loss(gen_adv, gen_noattack)
-            
-            ssim_local, psnr_local = compare(denorm(gen_adv), denorm(gen_noattack))
-            ssim += ssim_local
-            psnr += psnr_local
+            # Metrics
+            with torch.no_grad():
+                gen, _ = G(x_adv, c_trg)
 
-            if F.mse_loss(gen_adv, gen_noattack) > 0.05:
-                n_dist += 1
-            
-            n_samples += 1
+                # Add to lists
+                x_fake_list.append(gen_noattack)
+                # x_fake_list.append(perturb)
+                x_fake_list.append(gen)
 
-        # Save the translated images.
-        # x_concat = torch.cat(x_fake_list, dim=3)
+                l2_error += F.mse_loss(gen, gen_noattack)
+
+                ssim_local, psnr_local = compare(denorm(gen), denorm(gen_noattack))
+                ssim += ssim_local
+                psnr += psnr_local
+
+                if F.mse_loss(gen, gen_noattack) > 0.05:
+                    n_dist += 1
+                n_samples += 1
+
+        # Save the translated images
+        x_concat = torch.cat(x_fake_list, dim=3)
         result_path = os.path.join(config.result_dir, '{}-images.jpg'.format(i + 1))
-        save_image(denorm(gen_adv.data.cpu()), result_path, nrow=1, padding=0)
+        save_image(denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
 
         image_end = time.time()
         execution_image = image_end - image_start
