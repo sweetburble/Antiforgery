@@ -171,22 +171,3 @@ def avg_smoothing_filter(channels, kernel_size):
 여기서부터 병렬/분산 처리를 위한 코드 추가
 
 '''
-
-def forward_with_streams(model, x_real_batch, c_trg_batch):
-    """CUDA 스트림을 활용한 비동기 모델 추론"""
-    batch_size = x_real_batch.size(0)
-    streams = [torch.cuda.Stream() for _ in range(batch_size)]
-    outputs = []
-
-    for i in range(batch_size):
-        with torch.cuda.stream(streams[i]):
-            gen_output = model(x_real_batch[i:i+1], c_trg_batch[i:i+1])
-            
-            # 모델 출력이 tuple인 경우 첫 번째 요소만 사용
-            if isinstance(gen_output, tuple):
-                gen_output = gen_output[0]
-            
-            outputs.append(gen_output)
-
-    torch.cuda.synchronize()  # 모든 스트림 완료 대기
-    return torch.cat(outputs)
