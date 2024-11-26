@@ -77,30 +77,54 @@ class CelebA(data.Dataset):
 
 
 # batch_size : 1 -> 16, num_workers : 0 -> os.cpu_count()
-def get_loader(image_dir, attr_path, selected_attrs, crop_size=178, image_size=256,
-               batch_size=16, dataset='CelebA', mode='test', num_workers=os.cpu_count()):
-    """Build and return a data loader."""
-    transform = []
-    if mode == 'train':
-        transform.append(T.RandomHorizontalFlip())
-    transform.append(T.CenterCrop(crop_size))
-    transform.append(T.Resize((image_size,image_size)))
-    transform.append(T.ToTensor())
-    transform.append(T.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)))
-    transform = T.Compose(transform)
+# def get_loader(image_dir, attr_path, selected_attrs, crop_size=178, image_size=256,
+#                batch_size=16, dataset='CelebA', mode='test', num_workers=os.cpu_count()):
+#     """Build and return a data loader."""
+#     transform = []
+#     if mode == 'train':
+#         transform.append(T.RandomHorizontalFlip())
+#     transform.append(T.CenterCrop(crop_size))
+#     transform.append(T.Resize((image_size,image_size)))
+#     transform.append(T.ToTensor())
+#     transform.append(T.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)))
+#     transform = T.Compose(transform)
 
-    if dataset == 'CelebA':
-        dataset = CelebA(image_dir, attr_path, selected_attrs, transform, mode)
-    elif dataset == 'RaFD':
-        dataset = ImageFolder(image_dir, transform)
+#     if dataset == 'CelebA':
+#         dataset = CelebA(image_dir, attr_path, selected_attrs, transform, mode)
+#     elif dataset == 'RaFD':
+#         dataset = ImageFolder(image_dir, transform)
 
-    data_loader = data.DataLoader(dataset=dataset,
-                                  batch_size=batch_size,
-                                  shuffle=(mode=='train'),
-                                  num_workers=num_workers, 
-                                  pin_memory=True) # GPU 전송 최적화
-    return data_loader
+#     data_loader = data.DataLoader(dataset=dataset,
+#                                   batch_size=batch_size,
+#                                   shuffle=(mode=='train'),
+#                                   num_workers=num_workers, 
+#                                   pin_memory=True) # GPU 전송 최적화
+#     return data_loader
 
 '''
 여기서부터 병렬/분산 처리를 위한 코드 추가
 '''
+
+from torch.utils.data import DataLoader
+
+def get_loader(image_dir, attr_path, selected_attrs,
+               crop_size=178, image_size=256,
+               batch_size=16, mode='test'):
+    """데이터 로더 설정."""
+    transform = T.Compose([
+        T.CenterCrop(crop_size),
+        T.Resize((image_size, image_size)),
+        T.ToTensor(),
+        T.Normalize(mean=(0.5,), std=(0.5,))
+    ])
+    
+    dataset = CelebA(image_dir=image_dir,
+                     attr_path=attr_path,
+                     selected_attrs=selected_attrs,
+                     transform=transform,
+                     mode=mode)
+    
+    return DataLoader(dataset,
+                      batch_size=batch_size,
+                      shuffle=(mode == 'train'),
+                      num_workers=os.cpu_count())

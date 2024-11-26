@@ -6,6 +6,8 @@ from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 from skimage.transform import resize
 from color_space import *  # RGB-LAB 변환 모듈
 
+import ray
+
 def load_model_weights(model, path):
     """모델의 가중치를 불러오는 함수"""
     pretrained_dict = torch.load(path, map_location='cuda', weights_only=True)
@@ -127,3 +129,32 @@ def lab_attack(X_nat, c_trg, model, epsilon=0.05, iter=100):
 
 '''
 
+@ray.remote
+def lab_attack_ray(X_nat, c_trg, model):
+    """LAB 공격을 병렬로 실행하는 Ray 태스크."""
+    epsilon = 0.05
+    iter = 100
+
+    criterion = torch.nn.MSELoss().cuda()
+    pert_a = torch.zeros(X_nat.shape[0], 2, X_nat.shape[2], X_nat.shape[3]).cuda().requires_grad_()
+    optimizer = torch.optim.Adam([pert_a], lr=1e-4)
+
+    X = (X_nat + 1) / 2  # 정규화 해제
+
+    for _ in range(iter):
+        X_lab = rgb2lab(X).cuda()
+        pert = torch.clamp(pert_a, min=-epsilon, max=epsilon)
+        X_lab[:, 1:, :, :] += pert
+        X_lab = torch.clamp(X_lab, min=-128, max=128)
+        
+        X_new = lab2rgb(X_lab).cuda()
+
+        gen_noattack, _ = model(X_nat)
+        gen_stargan, _ = model(X_new)
+
+        loss = -criterion(gen_stargan, gen_noattack)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    return X_new.detach(), pert.detach()

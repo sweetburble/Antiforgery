@@ -1,3 +1,4 @@
+from calendar import c
 from math import e
 import torch
 import numpy as np
@@ -15,52 +16,40 @@ from utils import *
 from model import Generator, Discriminator
 
 import time
-from multiprocessing import Pool
+import ray
 from logger import setup_logger
 
 def main():
     logger = setup_logger() # 로깅을 위한 logger 설정
     total_time = time.time() # 시작 시간 저장
-    parser = argparse.ArgumentParser()
 
-    # Model configuration.
-    parser.add_argument('--c_dim', type=int, default=5, help='dimension of domain labels (1st dataset)')
-    parser.add_argument('--c2_dim', type=int, default=8, help='dimension of domain labels (2nd dataset)')
-    parser.add_argument('--celeba_crop_size', type=int, default=178, help='crop size for the CelebA dataset')
-    parser.add_argument('--image_size', type=int, default=256, help='image resolution')
-    parser.add_argument('--g_conv_dim', type=int, default=64, help='number of conv filters in the first layer of G')
-    parser.add_argument('--d_conv_dim', type=int, default=64, help='number of conv filters in the first layer of D')
-    parser.add_argument('--g_repeat_num', type=int, default=6, help='number of residual blocks in G')
-    parser.add_argument('--d_repeat_num', type=int, default=6, help='number of strided conv layers in D')
+    ray.init() # Ray 초기화
 
-    # Data configuration.
-    parser.add_argument('--batch_size', type=int, default=1, help='mini-batch size')
-    parser.add_argument('--attack_iters', type=int, default=100)
+    # 설정값 초기화
+    config = {
+        'celeba_image_dir': 'C:/Users/Bandi/Desktop/Fork/AntiForgery/data/celeba/images',
+        'attr_path': 'C:/Users/Bandi/Desktop/Fork/AntiForgery/data/celeba/list_attr_celeba.txt',
+        'selected_attrs': ['Black_Hair', 'Blond_Hair', 'Brown_Hair', 'Male', 'Young'],
+        'batch_size': 4,
+        'image_size': 256,
+        'g_conv_dim': 64,
+        'c_dim': 5,
+        'g_repeat_num': 6,
+        'num_workers': 4,
+        'model_path': 'stargan_celeba_256/models/200000-D.ckpt',  # 생성자 가중치 경로 추가
+    }
 
-    parser.add_argument('--resume_iters', type=int, default=200000, help='resume training from this step')
-    parser.add_argument('--selected_attrs', '--list', nargs='+', help='selected attributes for the CelebA dataset',
-                        default=['Black_Hair', 'Blond_Hair', 'Brown_Hair', 'Male', 'Young'])
-
-    parser.add_argument('--test_iters', type=int, default=200000, help='test model from this step')
-
-    parser.add_argument('--num_workers', type=int, default=0)
-    parser.add_argument('--mode', type=str, default='test', choices=['train', 'test'])
-
-    parser.add_argument('--celeba_image_dir', type=str, default='C:/Users/Bandi/Desktop/Fork/AntiForgery/data/celeba/images')
-    parser.add_argument('--attr_path', type=str, default='C:/Users/Bandi/Desktop/Fork/AntiForgery/data/celeba/list_attr_celeba.txt')
-    parser.add_argument('--model_save_dir', type=str, default='stargan_celeba_256/models')
-    parser.add_argument('--result_dir', type=str, default='results')
-
-    config = parser.parse_args()
-
-    os.makedirs(config.result_dir, exist_ok=True)
+    # 데이터 로더 초기화
+    # 데이터 로더 설정
+    celeba_loader = get_loader(
+        image_dir=config['celeba_image_dir'],
+        attr_path=config['attr_path'],
+        selected_attrs=["Black_Hair", "Blond_Hair", "Brown_Hair", "Male", "Young"],
+        mode="test"
+    )
 
     # data loader
     start_time = time.time()
-
-    celeba_loader = get_loader(config.celeba_image_dir, config.attr_path, config.selected_attrs,
-                               config.celeba_crop_size, config.image_size, config.batch_size,
-                               'CelebA', config.mode, config.num_workers)
     
     end_time = time.time()
     execution_time = end_time - start_time
@@ -70,106 +59,28 @@ def main():
     # 모델 설정 및 로드
     start_time = time.time()
 
-    G = Generator(config.g_conv_dim, config.c_dim, config.g_repeat_num)
-    D = Discriminator(config.image_size, config.d_conv_dim, config.c_dim, config.d_repeat_num)
-    G.cuda()
-    D.cuda()
-    
-    # load weights
-    print('Loading the trained models from step {}...'.format(config.resume_iters))
-    logger.info('Loading the trained models from step {}...'.format(config.resume_iters))
+    # 모델 설정
+    G = Generator(conv_dim=64, c_dim=5, repeat_num=6).cuda()
+    D = Discriminator(image_size=256, conv_dim=64, c_dim=5, repeat_num=6).cuda()
+    G.load_state_dict(torch.load("path/to/G.ckpt"))
+    D.load_state_dict(torch.load("path/to/D.ckpt"))
 
-    G_path = os.path.join(config.model_save_dir, '{}-G.ckpt'.format(config.resume_iters))
-    D_path = os.path.join(config.model_save_dir, '{}-D.ckpt'.format(config.resume_iters))
-    
-    load_model_weights(G, G_path)
-    D.load_state_dict(torch.load(D_path, map_location='cuda'))
-    print("loading model successful")
-    logger.info("loading model successful")
-
-    end_time = time.time()
-    execution_time = end_time - start_time
-    print(f"*********** 모델 및 가중치 load 실행 시간: {execution_time} 초")
-    logger.info(f"*********** 모델 및 가중치 load 실행 시간: {execution_time} 초")
-
-    l2_error, ssim, psnr = 0.0, 0.0, 0.0
-    n_samples, n_dist = 0, 0
-
-    # 이미지 반복하여 처리 
-    start_time = time.time()
-
-    # 평균적인 이미지 한 장 처리 시간 측정을 위해
-    execution_time_one_image = 0.0
-
+    # 이미지 처리 루프
     for i, (x_real, c_org) in enumerate(celeba_loader):
-        image_start = time.time()
-
-        # Prepare input images and target domain labels.
         x_real = x_real.cuda()
-        c_trg_list = create_labels(c_org, config.c_dim, 'CelebA', config.selected_attrs)
+        c_trg_list = create_labels(c_org, c_dim=5, dataset='CelebA', selected_attrs=["Black_Hair", "Blond_Hair", "Brown_Hair", "Male", "Young"])
 
-        x_fake_list = [x_real]
+        # Ray 태스크로 LAB 공격 수행
+        futures = [lab_attack_ray.remote(x_real[i:i+1], c_trg_list[i], G) for i in range(len(x_real))]
+        results = ray.get(futures)  # 병렬 처리 결과 가져오기
 
-        # generate adv in lab space
-        x_adv, pert = lab_attack(x_real, c_trg_list, G, iter=config.attack_iters)
+        x_adv_list = [res[0] for res in results]
+        pert_list = [res[1] for res in results]
 
-        x_fake_list.append(x_adv)
-
-        # 결과 저장 및 평가
-        for idx, c_trg in enumerate(c_trg_list):
-            print('image', i+1, 'class', idx)
-            
-            with torch.no_grad():
-                x_real_mod = x_real
-                gen_noattack, gen_noattack_feats = G(x_real_mod, c_trg)
-
-            # Metrics
-            with torch.no_grad():
-                gen, _ = G(x_adv, c_trg)
-
-                # Add to lists
-                x_fake_list.append(gen_noattack)
-                # x_fake_list.append(perturb)
-                x_fake_list.append(gen)
-
-                l2_error += F.mse_loss(gen, gen_noattack)
-
-                ssim_local, psnr_local = compare(denorm(gen), denorm(gen_noattack))
-                ssim += ssim_local
-                psnr += psnr_local
-
-                if F.mse_loss(gen, gen_noattack) > 0.05:
-                    n_dist += 1
-                n_samples += 1
-
-        # Save the translated images
-        x_concat = torch.cat(x_fake_list, dim=3)
-        result_path = os.path.join(config.result_dir, '{}-images.jpg'.format(i + 1))
-        save_image(denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
-
-        image_end = time.time()
-        execution_image = image_end - image_start
-        print(f"*********** {i+1}번째 이미지 처리 시간: {execution_image} 초")   
-        logger.info(f"*********** {i+1}번째 이미지 처리 시간: {execution_image} 초")
-        
-        execution_time_one_image += execution_image
-
-        if i == 50:  # stop after this many images
-            break
-
-    end_time = time.time()
-    execution_time = end_time - start_time
-    print(f"*********** 이미지 처리 전체 실행 시간: {execution_time} 초")
-    print(f"*********** 평균적인 이미지 한 장 처리 시간: {execution_time_one_image / 50} 초")
-    logger.info(f"*********** 이미지 처리 전체 실행 시간: {execution_time} 초")
-    logger.info(f"*********** 평균적인 이미지 한 장 처리 시간: {execution_time_one_image / 50} 초")        
-
-    # Print metrics
-    print('{} images.L2 error: {}. ssim: {}. psnr: {}. n_dist: {}'.format(n_samples,
-                                                                     l2_error / n_samples,
-                                                                     ssim / n_samples,
-                                                                     psnr / n_samples,
-                                                                    float(n_dist) / n_samples))
+        # 결과 저장
+        for j, x_adv in enumerate(x_adv_list):
+            result_path = os.path.join("results", f"{i}_{j}_adv.jpg")
+            save_image(denorm(x_adv.cpu()), result_path)
     
     total_end_time = time.time()
     total = total_end_time-total_time
@@ -181,6 +92,29 @@ def main():
 
 '''
 
+@ray.remote
+def process_image(x_real, c_trg_list, config):
+    """
+    Ray 작업: 이미지 처리 (LAB 공격 수행)
+    """
+    # GPU 사용 여부 확인 및 설정
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # 각 worker 내에서 모델 초기화
+    G = Generator(config['g_conv_dim'], config['c_dim'], config['g_repeat_num']).to(device)
+    G.eval()
+
+    # 결과 저장 리스트
+    x_adv_list = []
+    
+    # 각 도메인 레이블에 대해 LAB 공격 수행
+    for c_trg in c_trg_list:
+        c_trg = c_trg.to(device)
+        x_real = x_real.to(device)
+        x_adv, pert = lab_attack(x_real, c_trg, G)
+        x_adv_list.append((x_adv.cpu(), pert.cpu()))  # 결과를 CPU로 이동하여 반환
+
+    return x_adv_list
 
 # 사용 예시
 if __name__ == "__main__":
