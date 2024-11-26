@@ -50,6 +50,8 @@ def create_labels(c_org, c_dim=5, dataset='CelebA', selected_attrs=None):
         elif dataset == 'RaFD':
             c_trg = label2onehot(torch.ones(c_org.size(0)) * i, c_dim)
 
+        # Ensure the output shape matches the batch size of the input
+        c_trg = c_trg.view(c_org.size(0), c_dim, 1, 1)  # Reshape to match [batch_size, c_dim, 1, 1]
         c_trg_list.append(c_trg.cuda())
     return c_trg_list
 
@@ -158,3 +160,30 @@ def lab_attack_ray(X_nat, c_trg, model):
         optimizer.step()
 
     return X_new.detach(), pert.detach()
+
+def lab_attack(X_nat, c_trg_list, model, epsilon=0.05, iter=100):
+    """LAB 공격 수행."""
+    criterion = torch.nn.MSELoss().cuda()
+    pert_a = torch.zeros(X_nat.shape[0], 2, X_nat.shape[2], X_nat.shape[3]).cuda().requires_grad_()
+    optimizer = torch.optim.Adam([pert_a], lr=1e-4)
+
+    X = (X_nat + 1) / 2  # 정규화 해제
+
+    for _ in range(iter):
+        X_lab = rgb2lab(X).cuda()
+        pert = torch.clamp(pert_a, min=-epsilon, max=epsilon)
+        X_lab[:, 1:, :, :] += pert
+        X_lab = torch.clamp(X_lab, min=-128, max=128)
+
+        X_new = lab2rgb(X_lab).cuda()
+
+        # Generator에 도메인 레이블(c_trg_list) 전달
+        gen_noattack, _ = model(X_nat.cuda(), c_trg_list[0].cuda())  # c_trg_list도 GPU로 이동
+        gen_stargan, _ = model(X_new.cuda(), c_trg_list[0].cuda())
+
+        loss = -criterion(gen_stargan, gen_noattack)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    return X_new.detach(), pert_a.detach()
