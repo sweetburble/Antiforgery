@@ -1,9 +1,7 @@
 from math import e
 import torch
-import numpy as np
 import argparse
 import os
-from torch.autograd import Variable
 from torchvision.utils import save_image
 import torch
 import torch.nn.functional as F
@@ -11,15 +9,21 @@ import torch.nn.functional as F
 from color_space import *
 from data_loader import get_loader
 from utils import *
+from gpu_logging import ResourceMonitor
 
 from model import Generator, Discriminator
 
 import time
-from multiprocessing import Pool
+import threading
 from logger import setup_logger
 
 def main():
-    logger = setup_logger() # 로깅을 위한 logger 설정
+    # CPU/GPU 모니터링 시작
+    monitor = ResourceMonitor(sampling_interval=1)
+    monitoring_thread = threading.Thread(target=monitor.collect_metrics, daemon=True)
+    monitoring_thread.start()
+
+    logger = setup_logger() # 프로젝트 소요시간 로깅을 위한 logger 설정
     total_time = time.time() # 시작 시간 저장
     parser = argparse.ArgumentParser()
 
@@ -46,9 +50,9 @@ def main():
     parser.add_argument('--num_workers', type=int, default=0)
     parser.add_argument('--mode', type=str, default='test', choices=['train', 'test'])
 
-    parser.add_argument('--celeba_image_dir', type=str, default='C:/Users/Bandi/Desktop/Fork/AntiForgery/data/celeba/images')
-    parser.add_argument('--attr_path', type=str, default='C:/Users/Bandi/Desktop/Fork/AntiForgery/data/celeba/list_attr_celeba.txt')
-    parser.add_argument('--model_save_dir', type=str, default='stargan_celeba_256/models')
+    parser.add_argument('--celeba_image_dir', type=str, default='../test_rl/data/celeba/images')
+    parser.add_argument('--attr_path', type=str, default='../test_rl/data/celeba/list_attr_celeba.txt')
+    parser.add_argument('--model_save_dir', type=str, default='../test_rl/stargan_celeba_256/models')
     parser.add_argument('--result_dir', type=str, default='results')
 
     config = parser.parse_args()
@@ -174,7 +178,12 @@ def main():
     total_end_time = time.time()
     total = total_end_time-total_time
     print(f"*********** main 실행시간: {total} 초")
-    logger.info(f"*********** main 실행시간: {total} 초")    
+    logger.info(f"*********** main 실행시간: {total} 초")
+
+    # CPU/GPU 모니터링 종료 및 결과 저장
+    monitor.do_run = False  # 스레드 종료 플래그
+    monitoring_thread.join()  # 스레드가 완전히 종료될 때까지 대기
+    monitor.log_statistics()  # 모니터링 결과 저장    
 
 '''
 여기서부터 병렬/분산 처리를 위한 코드 추가
