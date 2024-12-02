@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from color_space import *
 from data_loader import get_loader, CelebA
 from utils import *
-from gpu_logging import ResourceMonitor
+from gpu_logger import ResourceMonitor
 
 from model import Generator, Discriminator
 
@@ -23,7 +23,6 @@ from time_logger import setup_logger
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data.distributed import DistributedSampler
 
 def main():
     # CPU/GPU 모니터링 시작
@@ -31,8 +30,8 @@ def main():
     monitoring_thread = threading.Thread(target=resource_monitor.collect_metrics, daemon=True)
     monitoring_thread.start()
 
-    logger = setup_logger() # 프로젝트 소요시간 로깅을 위한 logger 설정
-    total_time = time.time() # 시작 시간 저장
+    time_logger = setup_logger() # 프로젝트 소요시간 로깅을 위한 logger 설정
+    start_time = time.time() # 프로젝트 시작 시간
     parser = argparse.ArgumentParser()
 
     # Model configuration.
@@ -73,7 +72,7 @@ def main():
         # 분산 학습 시작
         mp.spawn(
             train_model,
-            args=(world_size, args),
+            args=(world_size, args, time_logger),
             nprocs=world_size,
             join=True
         )
@@ -83,139 +82,15 @@ def main():
         monitoring_thread.join()
         resource_monitor.log_statistics()
 
-    # os.makedirs(config.result_dir, exist_ok=True)
+    total_time = time.time() - start_time
+    print(f"전체 프로젝트 소요 시간 : {total_time} 초")
+    time_logger.info(f"전체 프로젝트 소요 시간 : {total_time} 초")
 
-    # # data loader
-    # start_time = time.time()
 
-    # celeba_loader = get_loader(config.celeba_image_dir, config.attr_path, config.selected_attrs,
-    #                            config.celeba_crop_size, config.image_size, config.batch_size,
-    #                            'CelebA', config.mode, config.num_workers)
-    
-    # end_time = time.time()
-    # execution_time = end_time - start_time
-    # logger.info(f"************ celeba_loader 실행 시간: {execution_time} 초")
-    # print(f"************ celeba_loader 실행 시간: {execution_time} 초")
-
-    # # 모델 설정 및 로드
-    # start_time = time.time()
-
-    # G = Generator(config.g_conv_dim, config.c_dim, config.g_repeat_num)
-    # D = Discriminator(config.image_size, config.d_conv_dim, config.c_dim, config.d_repeat_num)
-    # G.cuda()
-    # D.cuda()
-    
-    # # load weights
-    # print('Loading the trained models from step {}...'.format(config.resume_iters))
-    # logger.info('Loading the trained models from step {}...'.format(config.resume_iters))
-
-    # G_path = os.path.join(config.model_save_dir, '{}-G.ckpt'.format(config.resume_iters))
-    # D_path = os.path.join(config.model_save_dir, '{}-D.ckpt'.format(config.resume_iters))
-    
-    # load_model_weights(G, G_path)
-    # D.load_state_dict(torch.load(D_path, map_location='cuda'))
-    # print("loading model successful")
-    # logger.info("loading model successful")
-
-    # end_time = time.time()
-    # execution_time = end_time - start_time
-    # print(f"*********** 모델 및 가중치 load 실행 시간: {execution_time} 초")
-    # logger.info(f"*********** 모델 및 가중치 load 실행 시간: {execution_time} 초")
-
-    # l2_error, ssim, psnr = 0.0, 0.0, 0.0
-    # n_samples, n_dist = 0, 0
-
-    # # 이미지 반복하여 처리 
-    # start_time = time.time()
-
-    # # 평균적인 이미지 한 장 처리 시간 측정을 위해
-    # execution_time_one_image = 0.0
-
-    # for i, (x_real, c_org) in enumerate(celeba_loader):
-    #     image_start = time.time()
-
-    #     # Prepare input images and target domain labels.
-    #     x_real = x_real.cuda()
-    #     c_trg_list = create_labels(c_org, config.c_dim, 'CelebA', config.selected_attrs)
-
-    #     x_fake_list = [x_real]
-
-    #     # generate adv in lab space
-    #     x_adv, pert = lab_attack(x_real, c_trg_list, G, iter=config.attack_iters)
-
-    #     x_fake_list.append(x_adv)
-
-    #     # 결과 저장 및 평가
-    #     for idx, c_trg in enumerate(c_trg_list):
-    #         print('image', i+1, 'class', idx)
-            
-    #         with torch.no_grad():
-    #             x_real_mod = x_real
-    #             gen_noattack, gen_noattack_feats = G(x_real_mod, c_trg)
-
-    #         # Metrics
-    #         with torch.no_grad():
-    #             gen, _ = G(x_adv, c_trg)
-
-    #             # Add to lists
-    #             x_fake_list.append(gen_noattack)
-    #             # x_fake_list.append(perturb)
-    #             x_fake_list.append(gen)
-
-    #             l2_error += F.mse_loss(gen, gen_noattack)
-
-    #             ssim_local, psnr_local = compare(denorm(gen), denorm(gen_noattack))
-    #             ssim += ssim_local
-    #             psnr += psnr_local
-
-    #             if F.mse_loss(gen, gen_noattack) > 0.05:
-    #                 n_dist += 1
-    #             n_samples += 1
-
-    #     # Save the translated images
-    #     x_concat = torch.cat(x_fake_list, dim=3)
-    #     result_path = os.path.join(config.result_dir, '{}-images.jpg'.format(i + 1))
-    #     save_image(denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
-
-    #     image_end = time.time()
-    #     execution_image = image_end - image_start
-    #     print(f"*********** {i+1}번째 이미지 처리 시간: {execution_image} 초")   
-    #     logger.info(f"*********** {i+1}번째 이미지 처리 시간: {execution_image} 초")
-        
-    #     execution_time_one_image += execution_image
-
-    #     if i == 50:  # stop after this many images
-    #         break
-
-    # end_time = time.time()
-    # execution_time = end_time - start_time
-    # print(f"*********** 이미지 처리 전체 실행 시간: {execution_time} 초")
-    # print(f"*********** 평균적인 이미지 한 장 처리 시간: {execution_time_one_image / 50} 초")
-    # logger.info(f"*********** 이미지 처리 전체 실행 시간: {execution_time} 초")
-    # logger.info(f"*********** 평균적인 이미지 한 장 처리 시간: {execution_time_one_image / 50} 초")        
-
-    # # Print metrics
-    # print('{} images.L2 error: {}. ssim: {}. psnr: {}. n_dist: {}'.format(n_samples,
-    #                                                                  l2_error / n_samples,
-    #                                                                  ssim / n_samples,
-    #                                                                  psnr / n_samples,
-    #                                                                 float(n_dist) / n_samples))
-    
-    total_end_time = time.time()
-    total = total_end_time-total_time
-    print(f"*********** main 실행시간: {total} 초")
-    logger.info(f"*********** main 실행시간: {total} 초")
-
-    # # CPU/GPU 모니터링 종료 및 결과 저장
-    # monitor.do_run = False  # 스레드 종료 플래그
-    # monitoring_thread.join()  # 스레드가 완전히 종료될 때까지 대기
-    # monitor.log_statistics()  # 모니터링 결과 저장    
 
 '''
 여기서부터 병렬/분산 처리를 위한 코드 추가
-
 '''
-
 def setup(rank, world_size):
     """분산 학습 환경 설정"""
     os.environ['MASTER_ADDR'] = 'localhost'
@@ -228,15 +103,16 @@ def cleanup():
 
 from torchvision import transforms as T
 
-def train_model(rank, world_size, args):
-    # 실행 시간 로거 설정 (rank 0에서만)
-    time_logger = setup_logger() if rank == 0 else None
+def train_model(rank, world_size, args, time_logger):
     
     # 각 GPU에서 실행될 학습 함수
     print(f"Running training on rank {rank}.")
     setup(rank, world_size)
-    start_time = time.time()
+
+    # 모델 설정 시작
+    model_load_start = time.time()
     
+    # rank 0에서만 실행시간을 로깅한다
     if rank == 0:
         time_logger.info(f"프로세스 시작 시간: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     
@@ -262,7 +138,10 @@ def train_model(rank, world_size, args):
     D.module.load_state_dict(torch.load(D_path, map_location=f'cuda:{rank}'))
     
     if rank == 0:
-        time_logger.info(f"모델 로드 완료 시간: {time.time() - start_time:.2f}초")
+        time_logger.info(f"모델 로드 완료 시간: {time.time() - model_load_start:.2f}초")
+
+    
+    data_setting_start = time.time()
 
     # data_loader.py의 get_loader 흉내
     """Build and return a data loader."""
@@ -292,14 +171,18 @@ def train_model(rank, world_size, args):
         subset,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=True
+        num_workers=8, # worker 수 증가
+        pin_memory=True,
+        persistent_workers=True # worker 재사용
     )
 
     l2_error, ssim, psnr = 0.0, 0.0, 0.0
     n_samples, n_dist = 0, 0
 
-    one_start_time = time.time() # 이미지 한 장당 소요되는 시간 측정을 위해
+    if (rank == 0): 
+        time_logger.info(f"Dataset, DataLoader 설정 시간 : {time.time() - data_setting_start:.2f}초")
+
+    total_image_process_start = time.time() # 이미지 한 장당 소요되는 시간 측정을 위해
 
     # 이미지 처리
     for i, (x_real, c_org) in enumerate(celeba_loader):
@@ -348,14 +231,14 @@ def train_model(rank, world_size, args):
 
         # GPU별 결과 저장
         x_concat = torch.cat(x_fake_list, dim=3)
-        result_path = os.path.join(args.result_dir, f'gpu{rank}_image{start_idx + i + 1}.jpg')
+        result_path = os.path.join(args.result_dir, f'GPU_{rank}_image{start_idx + i + 1}.jpg')
         save_image(denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
 
         if rank == 0:
             image_end = time.time()
             execution_image = image_end - batch_start
-            print(f"*********** {i+1}번째 이미지 처리 시간: {execution_image} 초")
-            time_logger.info(f"{i+1}번째 이미지 처리 시간: {execution_image}초")
+            print(f"*********** {i+1}번째 이미지 처리 시간 : {execution_image} 초")
+            time_logger.info(f"{i+1}번째 이미지 처리 시간 : {execution_image}초")
     
     # 메트릭 동기화
     dist.all_reduce(torch.tensor([l2_error]).cuda(rank), op=dist.ReduceOp.SUM)
@@ -366,18 +249,18 @@ def train_model(rank, world_size, args):
 
     if rank == 0:
         end_time = time.time()
-        avg_time = (end_time - one_start_time) / 25
-        total_time = (end_time - start_time)
+        total_time = (end_time - total_image_process_start)
+        avg_time = (end_time - total_image_process_start) / 25
 
-        print(f"평균적인 이미지 한 장 처리 시간: {avg_time}초")
-        time_logger.info(f"평균적인 이미지 한 장 처리 시간: {avg_time}초")
+        print(f"평균적인 이미지 한 장 처리 시간 : {avg_time}초")
+        time_logger.info(f"평균적인 이미지 한 장 처리 시간 : {avg_time}초")
 
-        print(f"전체 실행 시간: {total_time}초")
-        time_logger.info(f"전체 실행 시간: {total_time}초")
+        print(f"전체 이미지 처리 시간 : {total_time}초")
+        time_logger.info(f"전체 이미지 처리 시간 : {total_time}초")
 
-        print(f'{n_samples} images. L2 error: {l2_error/n_samples}. '
-              f'ssim: {ssim/n_samples}. psnr: {psnr/n_samples}. '
-              f'n_dist: {float(n_dist)/n_samples}')
+        print(f'{n_samples} images.\nL2 error : {l2_error/n_samples}. '
+              f'ssim : {ssim/n_samples}. psnr : {psnr/n_samples}. '
+              f'n_dist : {float(n_dist)/n_samples}')
     
     cleanup()
 

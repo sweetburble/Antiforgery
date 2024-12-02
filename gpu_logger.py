@@ -56,7 +56,7 @@ class ResourceMonitor:
             time.sleep(self.sampling_interval)
     
     def log_statistics(self):
-        self.logger.info(f"\n=== 리소스 사용 통계 ===")
+        self.logger.info(f"=== 리소스 사용 통계 ===")
         self.logger.info(f"CPU 사용률:")
         self.logger.info(f"  평균: {statistics.mean(self.cpu_usage):.2f}%")
         self.logger.info(f"  최소: {min(self.cpu_usage):.2f}%")
