@@ -124,7 +124,8 @@ def cleanup():
     """분산 학습 환경 정리"""
     dist.destroy_process_group()
 
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp.grad_scaler import GradScaler
+from torch.amp.autocast_mode import autocast
 
 def train_model(rank, world_size, args):
 
@@ -158,9 +159,10 @@ def train_model(rank, world_size, args):
     G = DDP(G, device_ids=[rank], 
             bucket_cap_mb=25, # 버킷 크기 최적화
             broadcast_buffers=False, # 불필요한 버퍼 동기화 방지
-            gradient_as_bucket_view=True # 메모리 효율성
+            gradient_as_bucket_view=True, # 메모리 효율성
+            find_unused_parameters=True # 미사용 파라미터 감지 활성화
             )
-    D = DDP(D, device_ids=[rank])
+    D = DDP(D, device_ids=[rank], find_unused_parameters=True)
     
     # 가중치 로드
     G_path = os.path.join(args.model_save_dir, f'{args.resume_iters}-G.ckpt')
@@ -231,52 +233,61 @@ def train_model(rank, world_size, args):
             
         batch_start = time.time()
         
-        # Prepare input images and target domain labels.
-        x_real = x_real.cuda(rank)
-        c_trg_list = create_labels(c_org, args.c_dim, 'CelebA', args.selected_attrs)
+        # 메모리 최적화를 위한 컨텍스트 관리자
+        with autocast():
+            x_real = x_real.cuda(rank)
+            c_trg_list = create_labels(c_org, args.c_dim, 'CelebA', args.selected_attrs)
+            x_fake_list = [x_real]
 
-        x_fake_list = [x_real]
+            # lab_attack 호출 시 메모리 최적화
+            x_adv, pert = lab_attack(x_real, c_trg_list, G, iter=args.attack_iters)
+            x_fake_list.append(x_adv)
 
-        # generate adv in lab space
-        x_adv, pert = lab_attack(x_real, c_trg_list, G, iter=args.attack_iters)
+            # 결과 저장 및 평가
+            for idx, c_trg in enumerate(c_trg_list):
+                print(f'GPU {rank}: Processing image {start_idx + i}, class {idx}')
+                
+                with torch.no_grad():
+                    # 중간 결과물 메모리 해제
+                    torch.cuda.empty_cache()
+                    
+                    x_real_mod = x_real
+                    gen_noattack, gen_noattack_feats = G(x_real_mod, c_trg)
+                    
+                    # 불필요한 특징 맵 즉시 해제
+                    del gen_noattack_feats
+                    torch.cuda.empty_cache()
 
-        x_fake_list.append(x_adv)
+                # Metrics 계산
+                with torch.no_grad():
+                    gen, _ = G(x_adv, c_trg)
+                    
+                    x_fake_list.append(gen_noattack)
+                    x_fake_list.append(gen)
 
-        if (rank == 0):
-            print(f"처음 이미지를 처리하는 데 걸리는 시간 : {time.time() - batch_start}")
-            time_logger.info(f"처음 이미지를 처리하는 데 걸리는 시간 : {time.time() - batch_start}")
+                    # 메트릭 계산 후 즉시 텐서 해제
+                    l2_error += F.mse_loss(gen, gen_noattack).item()
+                    ssim_local, psnr_local = compare(denorm(gen), denorm(gen_noattack))
+                    ssim += ssim_local
+                    psnr += psnr_local
 
-        # 결과 저장 및 평가
-        for idx, c_trg in enumerate(c_trg_list):
-            print(f'GPU {rank}: Processing image {start_idx + i}, class {idx}')
+                    if F.mse_loss(gen, gen_noattack) > 0.05:
+                        n_dist += 1
+                    n_samples += 1
+                    
+                    # 중간 결과물 메모리 해제
+                    del gen, gen_noattack
+                    torch.cuda.empty_cache()
+
+            # GPU 별 결과 저장 전 메모리 정리
+            torch.cuda.empty_cache()
+            x_concat = torch.cat(x_fake_list, dim=3)
+            result_path = os.path.join(args.result_dir, f'GPU_{rank}_image{start_idx + i + 1}.jpg')
+            save_image(denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
             
-            with torch.no_grad():
-                x_real_mod = x_real
-                gen_noattack, gen_noattack_feats = G(x_real_mod, c_trg)
-
-            # Metrics
-            with torch.no_grad():
-                gen, _ = G(x_adv, c_trg)
-
-                # Add to lists
-                x_fake_list.append(gen_noattack)
-                # x_fake_list.append(perturb)
-                x_fake_list.append(gen)
-
-                l2_error += F.mse_loss(gen, gen_noattack)
-
-                ssim_local, psnr_local = compare(denorm(gen), denorm(gen_noattack))
-                ssim += ssim_local
-                psnr += psnr_local
-
-                if F.mse_loss(gen, gen_noattack) > 0.05:
-                    n_dist += 1
-                n_samples += 1
-
-        # GPU 별 결과 저장
-        x_concat = torch.cat(x_fake_list, dim=3)
-        result_path = os.path.join(args.result_dir, f'GPU_{rank}_image{start_idx + i + 1}.jpg')
-        save_image(denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
+            # 결과 저장 후 메모리 해제
+            del x_concat, x_fake_list
+            torch.cuda.empty_cache()
 
         if rank == 0:
             image_end = time.time()

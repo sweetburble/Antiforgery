@@ -95,9 +95,9 @@ def lab_attack(X_nat, c_trg, model, epsilon=0.05, iter=100):
             break
 
         with torch.no_grad():
-            gen_noattack, _ = model(X_nat, c_trg[i % len(c_trg)])
+            gen_noattack, _ = model.module(X_nat, c_trg[i % len(c_trg)])
 
-        gen_stargan, _ = model(X_new, c_trg[i % len(c_trg)])
+        gen_stargan, _ = model.module(X_new, c_trg[i % len(c_trg)])
         loss = -criterion(gen_stargan, gen_noattack)
 
         if torch.isnan(loss):
