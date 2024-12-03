@@ -91,25 +91,51 @@ def main():
 '''
 여기서부터 병렬/분산 처리를 위한 코드 추가
 '''
+from torchvision import transforms as T
+import datetime
+
 def setup(rank, world_size):
     """분산 학습 환경 설정"""
+    # 환경 변수 설정을 함수 내부로 이동
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    
+    # NCCL 백엔드 최적화 설정 추가
+    os.environ['NCCL_DEBUG'] = 'INFO'
+    os.environ['NCCL_IB_DISABLE'] = '0'
+    os.environ['NCCL_SOCKET_IFNAME'] = 'eth0'
+
+    # 타임아웃 설정 추가
+    timeout = datetime.timedelta(minutes=30)
+    
+    try:
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            world_size=world_size,
+            rank=rank,
+            timeout=timeout
+        )
+    except Exception as e:
+        print(f"Process group initialization failed: {e}")
+        raise
 
 def cleanup():
     """분산 학습 환경 정리"""
     dist.destroy_process_group()
 
-from torchvision import transforms as T
+from torch.cuda.amp import autocast, GradScaler
 
 def train_model(rank, world_size, args):
+
     time_logger = setup_logger() if (rank == 0) else None # 프로젝트 소요시간 로깅을 위한 logger 설정
     
     # 각 GPU에서 실행될 학습 함수
     print(f"Running training on rank {rank}.")
 
     setup(rank, world_size)
+
+    torch.backends.cudnn.benchmark = True  # CUDNN 벤치마크 활성화
 
     # 모델 설정 시작
     model_load_start = time.time()
@@ -129,7 +155,11 @@ def train_model(rank, world_size, args):
     D = D.cuda(rank)
     
     # DDP 래핑
-    G = DDP(G, device_ids=[rank])
+    G = DDP(G, device_ids=[rank], 
+            bucket_cap_mb=25, # 버킷 크기 최적화
+            broadcast_buffers=False, # 불필요한 버퍼 동기화 방지
+            gradient_as_bucket_view=True # 메모리 효율성
+            )
     D = DDP(D, device_ids=[rank])
     
     # 가중치 로드
@@ -187,6 +217,12 @@ def train_model(rank, world_size, args):
         time_logger.info(f"Dataset, DataLoader 설정 시간 : {time.time() - data_setting_start:.2f}초")
 
     total_image_process_start = time.time() # 이미지 한 장당 소요되는 시간 측정을 위해
+
+    # AMP 스케일러 초기화
+    scaler = GradScaler()
+    
+    # 메모리 캐시 초기화
+    torch.cuda.empty_cache()
 
     # 이미지 처리
     for i, (x_real, c_org) in enumerate(celeba_loader):
