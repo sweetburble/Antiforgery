@@ -72,7 +72,7 @@ def main():
         # 분산 학습 시작
         mp.spawn(
             train_model,
-            args=(world_size, args, time_logger),
+            args=(world_size, args),
             nprocs=world_size,
             join=True
         )
@@ -103,10 +103,12 @@ def cleanup():
 
 from torchvision import transforms as T
 
-def train_model(rank, world_size, args, time_logger):
+def train_model(rank, world_size, args):
+    time_logger = setup_logger() if (rank == 0) else None # 프로젝트 소요시간 로깅을 위한 logger 설정
     
     # 각 GPU에서 실행될 학습 함수
     print(f"Running training on rank {rank}.")
+
     setup(rank, world_size)
 
     # 모델 설정 시작
@@ -135,9 +137,10 @@ def train_model(rank, world_size, args, time_logger):
     D_path = os.path.join(args.model_save_dir, f'{args.resume_iters}-D.ckpt')
     
     load_model_weights(G.module, G_path)
-    D.module.load_state_dict(torch.load(D_path, map_location=f'cuda:{rank}'))
+    D.module.load_state_dict(torch.load(D_path, map_location=f'cuda:{rank}', weights_only=True))
     
     if rank == 0:
+        print(f"모델 로드 완료 시간: {time.time() - model_load_start:.2f}초")
         time_logger.info(f"모델 로드 완료 시간: {time.time() - model_load_start:.2f}초")
 
     
@@ -180,6 +183,7 @@ def train_model(rank, world_size, args, time_logger):
     n_samples, n_dist = 0, 0
 
     if (rank == 0): 
+        print(f"Dataset, DataLoader 설정 시간 : {time.time() - data_setting_start:.2f}초")
         time_logger.info(f"Dataset, DataLoader 설정 시간 : {time.time() - data_setting_start:.2f}초")
 
     total_image_process_start = time.time() # 이미지 한 장당 소요되는 시간 측정을 위해
@@ -201,6 +205,10 @@ def train_model(rank, world_size, args, time_logger):
         x_adv, pert = lab_attack(x_real, c_trg_list, G, iter=args.attack_iters)
 
         x_fake_list.append(x_adv)
+
+        if (rank == 0):
+            print(f"처음 이미지를 처리하는 데 걸리는 시간 : {time.time() - batch_start}")
+            time_logger.info(f"처음 이미지를 처리하는 데 걸리는 시간 : {time.time() - batch_start}")
 
         # 결과 저장 및 평가
         for idx, c_trg in enumerate(c_trg_list):
@@ -229,7 +237,7 @@ def train_model(rank, world_size, args, time_logger):
                     n_dist += 1
                 n_samples += 1
 
-        # GPU별 결과 저장
+        # GPU 별 결과 저장
         x_concat = torch.cat(x_fake_list, dim=3)
         result_path = os.path.join(args.result_dir, f'GPU_{rank}_image{start_idx + i + 1}.jpg')
         save_image(denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
@@ -259,6 +267,9 @@ def train_model(rank, world_size, args, time_logger):
         time_logger.info(f"전체 이미지 처리 시간 : {total_time}초")
 
         print(f'{n_samples} images.\nL2 error : {l2_error/n_samples}. '
+              f'ssim : {ssim/n_samples}. psnr : {psnr/n_samples}. '
+              f'n_dist : {float(n_dist)/n_samples}')
+        time_logger.info(f'{n_samples} images.\nL2 error : {l2_error/n_samples}. '
               f'ssim : {ssim/n_samples}. psnr : {psnr/n_samples}. '
               f'n_dist : {float(n_dist)/n_samples}')
     
