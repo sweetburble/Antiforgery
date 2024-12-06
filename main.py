@@ -72,7 +72,7 @@ def main():
         # 분산 학습 시작
         mp.spawn(
             train_model,
-            args=(world_size, args),
+            args=(world_size, args, time_logger),
             nprocs=world_size,
             join=True
         )
@@ -82,9 +82,9 @@ def main():
         monitoring_thread.join()
         resource_monitor.log_statistics()
 
-    total_time = time.time() - start_time
-    print(f"전체 프로젝트 소요 시간 : {total_time} 초")
-    time_logger.info(f"전체 프로젝트 소요 시간 : {total_time} 초")
+        total_time = time.time() - start_time
+        print(f"전체 프로젝트 소요 시간 : {total_time} 초")
+        time_logger.info(f"전체 프로젝트 소요 시간 : {total_time} 초")
 
 
 
@@ -124,13 +124,9 @@ def cleanup():
     """분산 학습 환경 정리"""
     dist.destroy_process_group()
 
-from torch.amp.grad_scaler import GradScaler
-from torch.amp.autocast_mode import autocast
+from torch.cuda.amp import autocast, GradScaler
 
-def train_model(rank, world_size, args):
-
-    time_logger = setup_logger() if (rank == 0) else None # 프로젝트 소요시간 로깅을 위한 logger 설정
-    
+def train_model(rank, world_size, args, logger):    
     # 각 GPU에서 실행될 학습 함수
     print(f"Running training on rank {rank}.")
 
@@ -143,7 +139,7 @@ def train_model(rank, world_size, args):
     
     # rank 0에서만 실행시간을 로깅한다
     if rank == 0:
-        time_logger.info(f"프로세스 시작 시간: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"프로세스 시작 시간: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     
     # GPU 설정
     torch.cuda.set_device(rank)
@@ -173,7 +169,7 @@ def train_model(rank, world_size, args):
     
     if rank == 0:
         print(f"모델 로드 완료 시간: {time.time() - model_load_start:.2f}초")
-        time_logger.info(f"모델 로드 완료 시간: {time.time() - model_load_start:.2f}초")
+        logger.info(f"모델 로드 완료 시간: {time.time() - model_load_start:.2f}초")
 
     
     data_setting_start = time.time()
@@ -207,7 +203,7 @@ def train_model(rank, world_size, args):
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=8, # worker 수 증가
-        pin_memory=True,
+        pin_memory=True, # CPU 전송 최적화
         persistent_workers=True # worker 재사용
     )
 
@@ -216,9 +212,10 @@ def train_model(rank, world_size, args):
 
     if (rank == 0): 
         print(f"Dataset, DataLoader 설정 시간 : {time.time() - data_setting_start:.2f}초")
-        time_logger.info(f"Dataset, DataLoader 설정 시간 : {time.time() - data_setting_start:.2f}초")
+        logger.info(f"Dataset, DataLoader 설정 시간 : {time.time() - data_setting_start:.2f}초")
 
-    total_image_process_start = time.time() # 이미지 한 장당 소요되는 시간 측정을 위해
+    # CUDA 관련 작업 소요 시간 측정 시작
+    ddp_setting_start = time.time()
 
     # AMP 스케일러 초기화
     scaler = GradScaler()
@@ -226,11 +223,17 @@ def train_model(rank, world_size, args):
     # 메모리 캐시 초기화
     torch.cuda.empty_cache()
 
+
     # 이미지 처리
     for i, (x_real, c_org) in enumerate(celeba_loader):
         if i >= 25:  # 각 GPU당 25개 이미지만 처리
             break
-            
+
+        if (rank == 0 and i == 0):
+            print(f"DDP 설정 시간 : {time.time() - ddp_setting_start:.3f}초")
+            logger.info(f"DDP 설정 시간 : {time.time() - ddp_setting_start:.3f}초")
+            total_image_process_start = time.time() # 이미지 한 장당 소요되는 시간 측정을 위해
+
         batch_start = time.time()
         
         # 메모리 최적화를 위한 컨텍스트 관리자
@@ -292,8 +295,8 @@ def train_model(rank, world_size, args):
         if rank == 0:
             image_end = time.time()
             execution_image = image_end - batch_start
-            print(f"*********** {i+1}번째 이미지 처리 시간 : {execution_image} 초")
-            time_logger.info(f"{i+1}번째 이미지 처리 시간 : {execution_image}초")
+            print(f"{i+1}번째 이미지 처리 시간 : {execution_image} 초")
+            logger.info(f"{i+1}번째 이미지 처리 시간 : {execution_image}초")
     
     # 메트릭 동기화
     dist.all_reduce(torch.tensor([l2_error]).cuda(rank), op=dist.ReduceOp.SUM)
@@ -308,15 +311,15 @@ def train_model(rank, world_size, args):
         avg_time = (end_time - total_image_process_start) / 25
 
         print(f"평균적인 이미지 한 장 처리 시간 : {avg_time}초")
-        time_logger.info(f"평균적인 이미지 한 장 처리 시간 : {avg_time}초")
+        logger.info(f"평균적인 이미지 한 장 처리 시간 : {avg_time}초")
 
         print(f"전체 이미지 처리 시간 : {total_time}초")
-        time_logger.info(f"전체 이미지 처리 시간 : {total_time}초")
+        logger.info(f"전체 이미지 처리 시간 : {total_time}초")
 
         print(f'{n_samples} images.\nL2 error : {l2_error/n_samples}. '
               f'ssim : {ssim/n_samples}. psnr : {psnr/n_samples}. '
               f'n_dist : {float(n_dist)/n_samples}')
-        time_logger.info(f'{n_samples} images.\nL2 error : {l2_error/n_samples}. '
+        logger.info(f'{n_samples} images.\nL2 error : {l2_error/n_samples}. '
               f'ssim : {ssim/n_samples}. psnr : {psnr/n_samples}. '
               f'n_dist : {float(n_dist)/n_samples}')
     
