@@ -163,3 +163,4 @@ cython_debug/
 data
 results
 stargan_celeba_256
+test.md

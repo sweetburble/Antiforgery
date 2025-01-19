@@ -13,6 +13,16 @@ def rgb2xyz(rgb):
     return out
 
 def xyz2rgb(xyz):
+    r = 3.24048134 * xyz[:, 0, :, :] - 1.53715152 * xyz[:, 1, :, :] - 0.49853633 * xyz[:, 2, :, :]
+    g = -0.96925495 * xyz[:, 0, :, :] + 1.87599 * xyz[:, 1, :, :] + .04155593 * xyz[:, 2, :, :]
+    b = .05564664 * xyz[:, 0, :, :] - .20404134 * xyz[:, 1, :, :] + 1.05731107 * xyz[:, 2, :, :]
+    rgb = torch.cat((r[:, None, :, :], g[:, None, :, :], b[:, None, :, :]), dim=1)
+    rgb = torch.clamp(rgb, min=0, max=1)
+    return rgb
+
+# 코드 개선 버전?
+'''
+def xyz2rgb(xyz):
     # 1) XYZ → (선형) RGB 변환
     r = 3.24048134 * xyz[:, 0, :, :] - 1.53715152 * xyz[:, 1, :, :] - 0.49853633 * xyz[:, 2, :, :]
     g = -0.96925495 * xyz[:, 0, :, :] + 1.87599 * xyz[:, 1, :, :] + .04155593 * xyz[:, 2, :, :]
@@ -35,6 +45,8 @@ def xyz2rgb(xyz):
 
     srgb = torch.clamp(srgb, min=0.0, max=1.0)
     return srgb
+'''
+
 
 def xyz2lab(xyz):
     sc = torch.Tensor((0.95047, 1., 1.08883))[None, :, None, None]

@@ -22,6 +22,9 @@ def main():
     total_time = time.time() # 시작 시간 저장
     parser = argparse.ArgumentParser()
 
+    torch.autograd.set_detect_anomaly(True)  # 메인 코드 시작 부분에 추가
+
+
     # Model configuration.
     parser.add_argument('--c_dim', type=int, default=5, help='dimension of domain labels (1st dataset)')
     parser.add_argument('--c2_dim', type=int, default=8, help='dimension of domain labels (2nd dataset)')
@@ -79,7 +82,7 @@ def main():
     D_path = os.path.join(config.model_save_dir, '{}-D.ckpt'.format(config.resume_iters))
     # self.G.load_state_dict(torch.load(G_path, map_location=lambda storage, loc: storage))
     load_model_weights(G, G_path)
-    D.load_state_dict(torch.load(D_path, map_location='cuda'))
+    D.load_state_dict(torch.load(D_path, map_location='cuda', weights_only=True))
     print("loading model successful")
 
     end_time = time.time()

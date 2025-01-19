@@ -41,9 +41,11 @@ class ActorCritic(nn.Module):
 def load_model_weights(model, path):
     pretrained_dict = torch.load(path, map_location=lambda storage, loc: storage, weights_only=True)
     model_dict = model.state_dict()
+
     pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'preprocessing' not in k}
+
     model_dict.update(pretrained_dict)
-    model.load_state_dict(pretrained_dict, strict=False)
+    model.load_state_dict(model_dict, strict=False)
 
 
 # Denormalization
@@ -115,12 +117,11 @@ def compare(img1, img2):
     return ssim, psnr
 
 
-# LAB Attack
 def lab_attack(X_nat, c_trg, model, epsilon=0.05, iter=100, gamma=0.99, clip_range=0.2, epochs=4):
     """LAB 공간에서의 공격: Actor-Critic 및 PPO 적용"""
     criterion = nn.MSELoss().cuda()
 
-    # Perturbation 초기화
+    # (a, b) 채널에 대한 2채널짜리 perturbation
     pert_a = torch.zeros(X_nat.shape[0], 2, X_nat.shape[2], X_nat.shape[3]).cuda().requires_grad_()
     optimizer = torch.optim.Adam([pert_a], lr=1e-4, betas=(0.9, 0.999))
 
@@ -130,106 +131,113 @@ def lab_attack(X_nat, c_trg, model, epsilon=0.05, iter=100, gamma=0.99, clip_ran
     rl_model = ActorCritic(state_dim, action_dim).cuda()
     rl_optimizer = torch.optim.Adam(rl_model.parameters(), lr=1e-4)
 
+    # -1~1 범위를 [0,1]로 바꿔주고 시작
     X = denorm(X_nat.clone())
 
     for step in range(iter):
-        # RGB 클램핑
-        X = torch.clamp(X, min=0, max=1)
+        # 1) RGB 영역 clamp [0, 1]
+        X = torch.clamp(X, min=0.0, max=1.0)
+
+        # 2) RGB -> LAB 변환
         X_lab = rgb2lab(X).cuda()
 
-        # LAB 클램핑
-        X_lab = torch.clamp(X_lab, min=-128, max=128)
+        # ※ 여기서 L, a, b 범위를 채널별로 따로 clamp
+        #    L 채널: [0, 100], a/b 채널: [-128, 128]
+        X_lab[:, 0, :, :] = torch.clamp(X_lab[:, 0, :, :], min=0.0, max=100.0)
+        X_lab[:, 1, :, :] = torch.clamp(X_lab[:, 1, :, :], min=-128.0, max=128.0)
+        X_lab[:, 2, :, :] = torch.clamp(X_lab[:, 2, :, :], min=-128.0, max=128.0)
 
+        # 현재 state를 (LAB 전체를 1D로 펼친) 벡터로 사용
         state = X_lab.view(-1).detach()
 
-        # NaN 및 Inf 디버깅
-        if torch.isnan(X).any() or torch.isinf(X).any():
-            print(f"[Error] NaN or Inf detected in X at step {step}")
-            print(f"X min: {X.min()}, X max: {X.max()}")
-            break
-
+        # NaN/Inf 체크
         if torch.isnan(X_lab).any() or torch.isinf(X_lab).any():
             print(f"[Error] NaN or Inf detected in X_lab at step {step}")
-            print(f"X_lab min: {X_lab.min()}, X_lab max: {X_lab.max()}")
             break
-
         if torch.isnan(state).any() or torch.isinf(state).any():
             print(f"[Error] NaN or Inf detected in state at step {step}")
-            print(f"state min: {state.min()}, state max: {state.max()}")
             break
 
-        # Actor-Critic: 행동 결정
+        # Actor-Critic으로 액션 결정
         policy, value = rl_model(state)
-
-        # 정책 점검 및 정규화
         if torch.isnan(policy).any() or torch.isinf(policy).any():
             print(f"[Error] NaN or Inf detected in policy at step {step}")
             break
 
         policy = F.softmax(policy, dim=-1)
-
         try:
             action = torch.multinomial(policy, 1).item()
         except RuntimeError as e:
             print(f"[Error] torch.multinomial failed at step {step} with policy: {policy}")
             raise
 
-        
+        # action == 1이면 (+ epsilon), action == 0이면 (- epsilon)
         perturb_change = epsilon if action == 1 else -epsilon
-        pert_a.data += perturb_change
+        
+        pert_a = pert_a.clone() + perturb_change
 
-        # Perturbation 적용 및 클램핑
-        X_lab[:, 1:, :, :] = torch.clamp(X_lab[:, 1:, :, :] + pert_a, min=-128, max=128)
+        # 실제 LAB 공간의 (a, b) 채널에 perturbation 적용
+        X_lab[:, 1:, :, :] += pert_a
+
+        # 다시 채널별 clamp 수행
+        X_lab = X_lab.clone()
+        X_lab[:, 0, :, :] = torch.clamp(X_lab[:, 0, :, :].clone(), min=0.0, max=100.0)
+        X_lab[:, 1, :, :] = torch.clamp(X_lab[:, 1, :, :].clone(), min=-128.0, max=128.0)
+        X_lab[:, 2, :, :] = torch.clamp(X_lab[:, 2, :, :].clone(), min=-128.0, max=128.0)
 
         try:
-            X_new = T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])(lab2rgb(X_lab))
+            # LAB -> RGB (sRGB) 변환 후, -1~1 범위를 쓰는 모델이라면 Normalize 적용
+            X_new = T.Normalize(mean=[0.5, 0.5, 0.5],
+                                std=[0.5, 0.5, 0.5])(lab2rgb(X_lab))
         except Exception as e:
             print(f"Error in LAB to RGB conversion: {e}")
             break
 
+        # 3) 모델에 넣어 GAN 생성
         gen_noattack, _ = model(X_nat, c_trg[step % len(c_trg)])
-        gen_attack, _ = model(X_new, c_trg[step % len(c_trg)])
+        gen_attack, _   = model(X_new, c_trg[step % len(c_trg)])
 
-        # PSNR 및 SSIM 계산
-        psnr_input_gan, ssim_input_gan = compare(X_nat, X_new) # 원본 이미지와 섭동이 추가된 방어 이미지 비교
+        # 4) PSNR/SSIM 계산
+        psnr_input_gan, ssim_input_gan   = compare(X_nat, X_new)
+        psnr_attack_gan, ssim_attack_gan = compare(gen_noattack, gen_attack)
 
-        psnr_attack_gan, ssim_attack_gan = compare(gen_noattack, gen_attack) # 원본 이미지/방어 이미지에 대한 GAN 생성 이미지들을 비교
+        # 5) 보상 계산
+        #   - (원본/섭동 GAN 비교) PSNR,SSIM을 '최대화' -> (+)
+        #   - (딥페이크 깨뜨리기, 즉 Attack-GAN PSNR,SSIM을 '최소화') -> (-)
+        reward = -(psnr_attack_gan + ssim_attack_gan) + (psnr_input_gan + ssim_input_gan)
 
-        # 보상 계산 (Attack-GAN의 PSNR 및 SSIM을 최소화하고, Input-GAN의 PSNR 및 SSIM을 최대화)
-        reward = - (psnr_attack_gan + ssim_attack_gan) + (psnr_input_gan + ssim_input_gan)
-
-        # Loss 및 디버깅 출력
-        print(f"[Iteration {step}] Loss: {reward:.4f}, "
+        # 디버깅 용도
+        print(f"[Iteration {step}] Reward: {reward:.4f}, "
               f"PSNR Input-GAN: {psnr_input_gan:.4f}, SSIM Input-GAN: {ssim_input_gan:.4f}, "
               f"PSNR Attack-GAN: {psnr_attack_gan:.4f}, SSIM Attack-GAN: {ssim_attack_gan:.4f}")
 
-        # PPO 최적화
+        # 6) PPO 업데이트 (간소화 형태)
         old_policy = policy.detach()
         _, next_value = rl_model(state)
 
         for epoch in range(epochs):
-            policy, value = rl_model(state)
-
-            if len(policy.shape) == 1:
-                policy = policy.unsqueeze(0)
+            new_policy, new_value = rl_model(state)
+            if len(new_policy.shape) == 1:
+                new_policy = new_policy.unsqueeze(0)
 
             action_tensor = torch.tensor([[action]]).cuda()
-
+            # (주의) 실제로는 ratio 계산, advantage 등 추가가 필요
             policy_loss = -torch.min(
-                torch.clamp(policy.gather(1, action_tensor), 1 - clip_range, 1 + clip_range),
+                torch.clamp(new_policy.gather(1, action_tensor), 1 - clip_range, 1 + clip_range),
                 reward + gamma * next_value.detach()
             )
-            value_loss = F.mse_loss(value, reward + gamma * next_value.detach())
+            value_loss = F.mse_loss(new_value, reward + gamma * next_value.detach())
 
             rl_optimizer.zero_grad()
             (policy_loss + value_loss).backward()
             rl_optimizer.step()
 
-        # Perturbation 업데이트
+        # 7) Perturbation 자체에 대한 optimizer (MSELoss 등)
         optimizer.zero_grad()
         criterion(gen_attack, gen_noattack).backward()
         optimizer.step()
 
+        # 다음 step에서 X를 업데이트
         X = X_new.detach()
 
     return X, X - X_nat
