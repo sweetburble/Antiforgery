@@ -14,14 +14,12 @@ from utils import *
 
 from model import Generator, Discriminator
 
-from torch.utils.tensorboard.writer import SummaryWriter
 import time
 import psutil
 
 
 def main():
     total_time = time.time() # 시작 시간 저장
-    writer = SummaryWriter()
     parser = argparse.ArgumentParser()
 
     # Model configuration.
@@ -98,6 +96,10 @@ def main():
     execution_time_one_image = 0.0
 
     for i, (x_real, c_org) in enumerate(celeba_loader):
+        # 10개 이미지만 처리
+        if i == 10: 
+            break
+
         image_start = time.time()
 
         # Prepare input images and target domain labels.
@@ -146,26 +148,22 @@ def main():
         
         execution_time_one_image += execution_image
 
-        if i == 50:  # stop after this many images
-            break
-
     end_time = time.time()
     execution_time = end_time - start_time
     print(f"*********** 이미지 처리 전체 실행 시간: {execution_time} 초")
 
-    print(f"*********** 평균적인 이미지 한 장 처리 시간: {execution_time_one_image / 50} 초")        
+    print(f"*********** 평균적인 이미지 한 장 처리 시간: {execution_time_one_image / 10} 초")        
 
     # Print metrics
     print('{} images.L2 error: {}. ssim: {}. psnr: {}. n_dist: {}'.format(n_samples,
-                                                                     l2_error / n_samples,
-                                                                     ssim / n_samples,
-                                                                     psnr / n_samples,
+                                                                    l2_error / n_samples,
+                                                                    ssim / n_samples,
+                                                                    psnr / n_samples,
                                                                     float(n_dist) / n_samples))
     
     total_end_time = time.time()
-    total = total_end_time-total_time
+    total = total_end_time - total_time
     print(f"*********** main 실행시간: {total} 초")    
-    writer.close()
 
 # 사용 예시
 if __name__ == "__main__":
