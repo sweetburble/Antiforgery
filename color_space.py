@@ -12,6 +12,7 @@ def rgb2xyz(rgb):
     out = torch.clamp(out, min=0, max=1)
     return out
 
+
 def xyz2rgb(xyz):
     r = 3.24048134 * xyz[:, 0, :, :] - 1.53715152 * xyz[:, 1, :, :] - 0.49853633 * xyz[:, 2, :, :]
     g = -0.96925495 * xyz[:, 0, :, :] + 1.87599 * xyz[:, 1, :, :] + .04155593 * xyz[:, 2, :, :]
@@ -21,31 +22,29 @@ def xyz2rgb(xyz):
     return rgb
 
 # 코드 개선 버전?
-'''
-def xyz2rgb(xyz):
-    # 1) XYZ → (선형) RGB 변환
-    r = 3.24048134 * xyz[:, 0, :, :] - 1.53715152 * xyz[:, 1, :, :] - 0.49853633 * xyz[:, 2, :, :]
-    g = -0.96925495 * xyz[:, 0, :, :] + 1.87599 * xyz[:, 1, :, :] + .04155593 * xyz[:, 2, :, :]
-    b = .05564664 * xyz[:, 0, :, :] - .20404134 * xyz[:, 1, :, :] + 1.05731107 * xyz[:, 2, :, :]
+# def xyz2rgb(xyz):
+#     # 1) XYZ → (선형) RGB 변환
+#     r = 3.24048134 * xyz[:, 0, :, :] - 1.53715152 * xyz[:, 1, :, :] - 0.49853633 * xyz[:, 2, :, :]
+#     g = -0.96925495 * xyz[:, 0, :, :] + 1.87599 * xyz[:, 1, :, :] + .04155593 * xyz[:, 2, :, :]
+#     b = .05564664 * xyz[:, 0, :, :] - .20404134 * xyz[:, 1, :, :] + 1.05731107 * xyz[:, 2, :, :]
 
-    linear_rgb = torch.cat((r[:, None, :, :], 
-                            g[:, None, :, :], 
-                            b[:, None, :, :]), dim=1)
+#     linear_rgb = torch.cat((r[:, None, :, :], 
+#                             g[:, None, :, :], 
+#                             b[:, None, :, :]), dim=1)
     
-    # 2) 선형 RGB를 sRGB 감마로 보정
-    #    sRGB 표준에 따라 0.0031308 기준으로 나누어 처리
-    threshold = 0.0031308
-    under_mask  = (linear_rgb <= threshold).type(linear_rgb.dtype)
-    over_mask   = (linear_rgb > threshold).type(linear_rgb.dtype)
+#     # 2) 선형 RGB를 sRGB 감마로 보정
+#     #    sRGB 표준에 따라 0.0031308 기준으로 나누어 처리
+#     threshold = 0.0031308
+#     under_mask  = (linear_rgb <= threshold).type(linear_rgb.dtype)
+#     over_mask   = (linear_rgb > threshold).type(linear_rgb.dtype)
     
-    # under_mask인 부분은 12.92 * (linear RGB)
-    # over_mask인 부분은 1.055 * (linear RGB^(1/2.4)) - 0.055
-    srgb = under_mask * (12.92 * linear_rgb) \
-          + over_mask  * (1.055 * (linear_rgb.clamp(min=0)) ** (1.0/2.4) - 0.055)
+#     # under_mask인 부분은 12.92 * (linear RGB)
+#     # over_mask인 부분은 1.055 * (linear RGB^(1/2.4)) - 0.055
+#     srgb = under_mask * (12.92 * linear_rgb) \
+#           + over_mask  * (1.055 * (linear_rgb.clamp(min=0)) ** (1.0/2.4) - 0.055)
 
-    srgb = torch.clamp(srgb, min=0.0, max=1.0)
-    return srgb
-'''
+#     srgb = torch.clamp(srgb, min=0.0, max=1.0)
+#     return srgb
 
 
 def xyz2lab(xyz):
