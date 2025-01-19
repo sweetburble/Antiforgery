@@ -117,7 +117,7 @@ def compare(img1, img2):
 
 # LAB Attack
 def lab_attack(X_nat, c_trg, model, epsilon=0.05, iter=100, gamma=0.99, clip_range=0.2, epochs=4):
-    """LAB 공간에서의 공격: A3C 및 PPO 적용"""
+    """LAB 공간에서의 공격: Actor-Critic 및 PPO 적용"""
     criterion = nn.MSELoss().cuda()
 
     # Perturbation 초기화
